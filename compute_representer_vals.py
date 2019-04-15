@@ -3,20 +3,13 @@
 import time
 import sys
 import argparse
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
-import numpy as np
-import math
 import pickle
-import os
-import torch
-import torch.nn as nn
 dtype = torch.cuda.FloatTensor
-import time
 
 
 class softmax(nn.Module):
@@ -64,7 +57,6 @@ def load_data(dataset):
         print('done loading')
         model = softmax(W_36)
         model.cuda()
-        start = time.time()
         x_val = np.concatenate(
             [
                 intermediate_output_34,
@@ -132,7 +124,6 @@ def train(X, Y, model, args):
     min_loss = 10000.0
     optimizer = optim.SGD([model.W], lr=1.0)
     for epoch in range(args.epoch):
-        sum_loss = 0
         phi_loss = 0
         optimizer.zero_grad()
         (Phi, L2) = model(x, y)
