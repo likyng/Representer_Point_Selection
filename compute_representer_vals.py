@@ -5,20 +5,28 @@ import sys
 import argparse
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 import pickle
+from scipy.stats.stats import pearsonr
 dtype = torch.cuda.FloatTensor
 
 
-class softmax(nn.Module):
+class softmax(torch.nn.Module):
     def __init__(self, W):
         super(softmax, self).__init__()
         self.W = Variable(torch.from_numpy(W).type(dtype), requires_grad=True)
 
     def forward(self, x, y):
-        # calculate loss for the loss function and L2 regularizer
+        """Calculate loss for the loss function and L2 regularizer
+
+        Arguments:
+            x: input data
+            y: labels
+
+        Returns:
+            Phi: torch tensor, model predictions shape(1) [TODO: check!]
+            L2: torch tensor, L2 distance shape(1)"""
         D = (torch.matmul(x, self.W))
         D_max, _ = torch.max(D, dim=1, keepdim=True)
         D = D - D_max
@@ -31,11 +39,28 @@ class softmax(nn.Module):
 
 
 def softmax_np(x):
+    """Returns the softmax
+
+    Arguments:
+        x: torch tensor
+
+    Returns:
+        softmax: numpy tensor"""
     e_x = np.exp(x - np.max(x, axis=1, keepdims=True))
     return e_x / e_x.sum(axis=1, keepdims=True)
 
 
 def load_data(dataset):
+    """Loads the specified dataset and returns the required values.
+
+    Arguments:
+        dataset: string, name of the dataset to be loaded. Either Cifar or AwA.
+
+    Returns:
+        x_val: np array, shape(#train samples x 4097)
+        y_val: np array, shape(#train samples x #classes)
+        model: torch model, contains the DNN model with
+            model.W.shape = (4097 x #classes), from W_36"""
     if dataset == "Cifar":
         with open("data/weight_323436.pkl", "rb") as input_file:
             [
@@ -62,14 +87,10 @@ def load_data(dataset):
                 intermediate_output_34,
                 np.ones((intermediate_output_34.shape[0], 1))], axis=1)
         y_val = intermediate_output_36
-        # return (np.concatenate([intermediate_output_34,np.ones((intermediate_output_34.shape[0],1))],axis = 1), intermediate_output_36, model)
         return (x_val, y_val, model)
 
     elif dataset == "AwA":
         with open("data/weight_bias.pickle", "rb") as input_file:
-            # for python 2 run
-            # [weight,bias] = pickle.load(input_file)
-            # for python 3
             [weight, bias] = pickle.load(input_file, encoding='latin1')
         train_feature = np.squeeze(np.load('data/train_feature_awa.npy'))
         train_output = np.squeeze(np.load('data/train_output_awa.npy'))
@@ -87,29 +108,54 @@ def to_np(x):
     return x.data.cpu().numpy()
 
 
-def backtracking_line_search(optimizer, model, grad, x, y, val, beta, N, args):
-    # implmentation for backtracking line search
-    t = 10.0
-    beta = 0.5
+def backtracking_line_search(optimizer, model, grad, x, y, loss, N, lmbd,
+                             beta=0.5):
+    """Implements the backtracking line search.
+
+    Arguments:
+        optimizer: torch optimizer
+        model: torch model
+        grad: gradients
+        x: input, e.g. layer weights previous to y
+        y: output, e.g. layer weights posterior to x
+        loss: torch tensor w/ one float, loss
+        N: int, train dataset size (length of y)
+        lmbd: float, lambda of the L2 reguliser
+        beta: float, search control parameter tao of the line search gd
+    """
+    t = 10.0    # step size alpha_0
     W_O = to_np(model.W)
     grad_np = to_np(grad)
+
     while(True):
+        # Update the model's weights
         model.W = Variable(
-            torch.from_numpy(W_O-t*grad_np).type(dtype), requires_grad=True)
+            torch.from_numpy(W_O - t * grad_np).type(dtype), requires_grad=True)
         val_n = 0.0
+        # Does one forward prop. on layer 34th weights (x) and
+        # layer 36 output (y). According to formular 3 (p. 4) in the paper.
         (Phi, L2) = model(x, y)
-        val_n = Phi/N + L2*args.lmbd
+        val_n = Phi / N + L2 * lmbd
         if t < 0.0000000001:
             print("t too small")
             break
-        if to_np(val_n - val + t * torch.norm(grad) ** 2 / 2) >= 0:
+        # Testing for Armijo-Goldstein condition, if not satisfied decrease t
+        if to_np(val_n - loss + t * torch.norm(grad) ** 2 / 2) >= 0:
             t = beta * t
+        # Armijo-Goldstein condition reached --> finish
         else:
             break
 
 
 def softmax_torch(temp, N):
-    # calculation for softmax in torch, which avoids numerical overflow
+    """Calculation for softmax in torch, which avoids numerical overflow
+
+    Arguments:
+        temp: torch tensor, shape(#training dataset x #classes)
+        N: int, training dataset size
+
+    Returns:
+        """
     max_value, _ = torch.max(temp, 1, keepdim=True)
     temp = temp - max_value
     D_exp = torch.exp(temp)
@@ -128,7 +174,7 @@ def train(X, Y, model, args):
         optimizer.zero_grad()
         (Phi, L2) = model(x, y)
         loss = L2 * args.lmbd + Phi / N
-        phi_loss += to_np(Phi/N)
+        phi_loss += to_np(Phi / N)
         loss.backward()
         temp_W = model.W.data
         grad_loss = to_np(torch.mean(torch.abs(model.W.grad)))
@@ -141,24 +187,27 @@ def train(X, Y, model, args):
             if min_loss < init_grad / 200:
                 print('stopping criteria reached in epoch :{}'.format(epoch))
                 break
+
+        # The model weights are updated in this step
         backtracking_line_search(
-            optimizer, model, model.W.grad, x, y, loss, 0.5, N, args)
+            optimizer, model, model.W.grad, x, y, loss, N, args.lmbd, 0.5)
+
         if epoch % 100 == 0:
             print('Epoch:{:4d}\tloss:{}\tphi_loss:{}\tgrad:{}'.format(
                 epoch, to_np(loss), phi_loss, grad_loss))
 
-    # caluculate w based on the representer theorem's decomposition
+    # caluculate W based on the representer theorem's decomposition
     temp = torch.matmul(x, Variable(best_W))
     softmax_value = softmax_torch(temp, N)
 
     # derivative of softmax cross entropy
-    weight_matrix = softmax_value-y
+    weight_matrix = softmax_value - y
     weight_matrix = torch.div(weight_matrix, (-2.0 * args.lmbd * N))
     print(weight_matrix[:5, :5].cpu())
     w = torch.matmul(torch.t(x), weight_matrix)
     print(w[:5, :5].cpu())
 
-    # calculate y_p, which is the prediction based on decomposition of w
+    # calculate y_p, which is the prediction based on decomposition of W
     # by representer theorem
     temp = torch.matmul(x, w.cuda())
     print(temp[:5, :5].cpu())
@@ -170,8 +219,7 @@ def train(X, Y, model, args):
           ' representer theorem decomposition')
     print(np.mean(np.abs(to_np(y) - y_p)))
 
-    from scipy.stats.stats import pearsonr
-    print('pearson correlation between ground truth  prediction and',
+    print('Pearson correlation between ground truth prediction and',
           ' prediciton by representer theorem')
     y = to_np(y)
     corr, _ = (pearsonr(y.flatten(), (y_p).flatten()))
@@ -185,7 +233,7 @@ def main(args):
     start = time.time()
     weight_matrix = train(x, y, model, args)
     end = time.time()
-    print('computational time')
+    print('Computational time')
     print(end - start)
 
     np.savez(
